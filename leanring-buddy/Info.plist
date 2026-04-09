@@ -16,5 +16,10 @@
 	<string>Clicky needs screen recording access to see your screen and help you.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Clicky uses speech recognition to transcribe your voice when you talk to it</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
