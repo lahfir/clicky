@@ -142,6 +142,17 @@ enum DS {
         /// Kept distinct from the accent since it serves a different purpose
         /// (screen overlay vs in-app UI).
         static let overlayCursorBlue = Color(hex: "#3380FF")
+        static let overlayCursorAmber = Color(hex: "#FFB224")
+
+        /// Active cursor tint — amber when Interactive mode is enabled
+        /// at launch, blue otherwise. Use this everywhere the overlay
+        /// cursor/waveform/spinner is tinted so the mode is visually
+        /// distinct without touching any other call site.
+        static var overlayCursorPrimary: Color {
+            InteractiveModeConfiguration.isEnabled
+                ? overlayCursorAmber
+                : overlayCursorBlue
+        }
 
         // ── Floating Button Gradient ─────────────────────────────────
 

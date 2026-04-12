@@ -118,4 +118,31 @@ enum ClickyAnalytics {
             "error": error
         ])
     }
+
+    // MARK: - Interactive Mode
+
+    static func trackInteractiveInvocationStarted(bundleID: String) {
+        PostHogSDK.shared.capture("interactive_invocation_started", properties: [
+            "bundle_id": bundleID
+        ])
+    }
+
+    static func trackInteractiveSuccess(actionCount: Int, durationMilliseconds: Int) {
+        PostHogSDK.shared.capture("interactive_success", properties: [
+            "action_count": actionCount,
+            "duration_ms": durationMilliseconds
+        ])
+    }
+
+    static func trackInteractiveFailure(reason: String) {
+        PostHogSDK.shared.capture("interactive_failure", properties: [
+            "reason": reason
+        ])
+    }
+
+    static func trackInteractiveFallbackToShow(reason: String) {
+        PostHogSDK.shared.capture("interactive_fallback_to_show", properties: [
+            "reason": reason
+        ])
+    }
 }

@@ -51,31 +51,48 @@ export default {
 async function handleChat(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
 
+  // Forward opt-in beta headers (e.g. context-management-2025-06-27) so
+  // the client can request features like clear_tool_uses_20250919 without
+  // touching the worker.
+  const upstreamRequestHeaders: Record<string, string> = {
+    "x-api-key": env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+  };
+  const anthropicBetaHeader = request.headers.get("anthropic-beta");
+  if (anthropicBetaHeader) {
+    upstreamRequestHeaders["anthropic-beta"] = anthropicBetaHeader;
+  }
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
+    headers: upstreamRequestHeaders,
     body,
   });
+
+  // Pass Retry-After back to the client on 429/5xx so it can honor
+  // Anthropic's rate-limit window instead of guessing a backoff.
+  const clientResponseHeaders: Record<string, string> = {
+    "content-type": response.headers.get("content-type") || "text/event-stream",
+    "cache-control": "no-cache",
+  };
+  const upstreamRetryAfterHeader = response.headers.get("retry-after");
+  if (upstreamRetryAfterHeader) {
+    clientResponseHeaders["retry-after"] = upstreamRetryAfterHeader;
+  }
 
   if (!response.ok) {
     const errorBody = await response.text();
     console.error(`[/chat] Anthropic API error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
-      headers: { "content-type": "application/json" },
+      headers: { ...clientResponseHeaders, "content-type": "application/json" },
     });
   }
 
   return new Response(response.body, {
     status: response.status,
-    headers: {
-      "content-type": response.headers.get("content-type") || "text/event-stream",
-      "cache-control": "no-cache",
-    },
+    headers: clientResponseHeaders,
   });
 }
 

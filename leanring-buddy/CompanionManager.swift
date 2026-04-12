@@ -506,7 +506,7 @@ final class CompanionManager: ObservableObject {
                     self.onboardingPromptText = ""
                 }
             }
-    
+
 
             ClickyAnalytics.trackPushToTalkStarted()
 
@@ -518,10 +518,22 @@ final class CompanionManager: ObservableObject {
                         // Partial transcripts are hidden (waveform-only UI)
                     },
                     submitDraftText: { [weak self] finalTranscript in
-                        self?.lastTranscript = finalTranscript
+                        guard let strongSelf = self else { return }
+                        strongSelf.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+
+                        // Mode dispatch: Interactive mode is enabled via the
+                        // CLICKY_INTERACTIVE_MODE environment variable (read once
+                        // at launch by InteractiveModeConfiguration). Show mode is
+                        // the default and remains byte-identical when the env var
+                        // is unset.
+                        if InteractiveModeConfiguration.isEnabled {
+                            print("🤖 Interactive mode enabled — dispatching to agent-desktop pipeline")
+                            strongSelf.dispatchInteractivePipeline(transcript: finalTranscript)
+                        } else {
+                            strongSelf.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        }
                     }
                 )
             }
@@ -536,6 +548,303 @@ final class CompanionManager: ObservableObject {
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
         case .none:
             break
+        }
+    }
+
+    // MARK: - Interactive Mode Pipeline
+
+    private lazy var agentDesktopRunner = AgentDesktopRunner()
+
+    /// Accumulator for text Claude emits after the final tool call. Cleared
+    /// on each tool dispatch — only the trailing text (after `end_turn`) is
+    /// ever spoken, per the system prompt's "act silently, summarize at end" rule.
+    private var interactiveFinalNarrationBuffer = ""
+
+    /// Global monitor that cancels the running pipeline on Escape keydown.
+    private var interactiveEscapeMonitor: Any?
+
+    /// Cursor flight animation is 0.6–1.4s depending on distance. 700ms lets
+    /// most flights finish before the action fires and keeps interactions snappy.
+    private static let interactiveCursorFlightSleepNanoseconds: UInt64 = 700_000_000
+
+    /// Hard cap on final narration length. Gives room for a natural
+    /// conversational answer (~30 words / 1–2 sentences) without letting a
+    /// verbose model dump a paragraph into TTS.
+    private static let interactiveFinalNarrationMaximumCharacters = 220
+
+    /// Short phrase spoken the moment push-to-talk releases, before the
+    /// Claude API call even starts. Gives the user immediate audio feedback
+    /// that Clicky heard them and is working. Fire-and-forget — plays in
+    /// parallel with the first Claude request.
+    private static let interactiveAcknowledgmentPhrase = "on it"
+
+    private static func buildInteractiveSystemPrompt(targetApplicationName: String) -> String {
+        """
+        you are clicky. you silently drive macOS apps via the agent_desktop tool. \
+        DO NOT WRITE ANY TEXT between tool calls — every character you emit becomes spoken TTS. \
+        the cursor overlay visually flies to each element you interact with, so the user already \
+        sees what you are doing. do not narrate it.
+
+        the user is currently on: \(targetApplicationName). \
+        FIRST call agent_desktop with command "snapshot" and args "--app \(targetApplicationName) -i --compact" to see the UI. \
+        refs like @e7 come from the most recent snapshot. if the UI changes after an action, snapshot again. \
+        reuse refs from the current snapshot when possible instead of re-snapshotting.
+
+        AFTER all tool calls are finished, write ONE natural-sounding sentence (1–2 short sentences max) \
+        that answers the user's question or tells them what you did. write the way you'd actually talk. \
+        lowercase, casual, warm. examples: \
+        "opened build settings — everything's in there", \
+        "found it, gemma 4 is under AI models on docker hub", \
+        "message sent". \
+        do NOT narrate each step, do NOT say "taking snapshot" or "i'll now", do NOT describe what you see. \
+        only speak at the end, not between actions. never type secrets or passwords.
+        """
+    }
+
+    private func dispatchInteractivePipeline(transcript: String) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+
+        currentResponseTask = Task {
+            voiceState = .processing
+            let pipelineStartTime = Date()
+
+            installInteractiveEscapeMonitor()
+            defer { tearDownInteractiveEscapeMonitor() }
+
+            do {
+                guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+                      let frontmostApplicationName = frontmostApplication.localizedName else {
+                    ClickyAnalytics.trackInteractiveFallbackToShow(reason: "no_frontmost_app")
+                    sendTranscriptToClaudeWithScreenshot(transcript: transcript)
+                    return
+                }
+                ClickyAnalytics.trackInteractiveInvocationStarted(
+                    bundleID: frontmostApplication.bundleIdentifier ?? ""
+                )
+                print("🤖 [Interactive] target: \(frontmostApplicationName)")
+
+                // Kick off an immediate spoken acknowledgment so the user
+                // hears something the moment they release push-to-talk.
+                // Fire-and-forget — plays in parallel with the first Claude
+                // API call, giving the illusion of zero latency.
+                Task { [weak self] in
+                    try? await self?.elevenLabsTTSClient.speakText(Self.interactiveAcknowledgmentPhrase)
+                }
+
+                guard !Task.isCancelled else { return }
+                _ = try await agentDesktopRunner.discoverBinary()
+                guard !Task.isCancelled else { return }
+
+                interactiveFinalNarrationBuffer = ""
+                let priorConversationHistory = conversationHistory.map {
+                    (userTranscript: $0.userTranscript, assistantResponse: $0.assistantResponse)
+                }
+
+                let interactiveClaudeResult = try await claudeAPI.analyzeInteractiveRequest(
+                    frontmostWindowImage: Data(),
+                    frontmostWindowImageMediaType: "image/jpeg",
+                    snapshotJSONString: "",
+                    userTranscript: transcript,
+                    interactiveSystemPrompt: Self.buildInteractiveSystemPrompt(
+                        targetApplicationName: frontmostApplicationName
+                    ),
+                    tools: InteractiveToolManifest.v1Tools,
+                    conversationHistory: priorConversationHistory,
+                    onTextChunk: { [weak self] textChunkDelta in
+                        self?.interactiveFinalNarrationBuffer += textChunkDelta
+                    },
+                    onToolUseStart: { [weak self] interactiveToolCall in
+                        guard let strongSelf = self else {
+                            return InteractiveToolResult(
+                                toolUseID: interactiveToolCall.toolUseID,
+                                content: "Clicky is no longer available",
+                                isError: true
+                            )
+                        }
+                        return await strongSelf.flyCursorAndDispatchInteractiveToolCall(
+                            interactiveToolCall,
+                            targetApplicationName: frontmostApplicationName
+                        )
+                    }
+                )
+
+                guard !Task.isCancelled else { return }
+
+                await speakFinalInteractiveNarrationIfAny()
+                appendInteractiveResultToConversationHistory(
+                    userTranscript: transcript,
+                    interactiveClaudeResult: interactiveClaudeResult
+                )
+
+                let pipelineDurationMilliseconds = Int(Date().timeIntervalSince(pipelineStartTime) * 1000)
+                ClickyAnalytics.trackInteractiveSuccess(
+                    actionCount: interactiveClaudeResult.toolCallsExecuted.count,
+                    durationMilliseconds: pipelineDurationMilliseconds
+                )
+                print("🤖 [Interactive] done — \(interactiveClaudeResult.totalTurns) turns, \(interactiveClaudeResult.toolCallsExecuted.count) tools, \(pipelineDurationMilliseconds)ms")
+
+            } catch is CancellationError {
+                print("🤖 [Interactive] cancelled")
+            } catch {
+                ClickyAnalytics.trackInteractiveFailure(reason: error.localizedDescription)
+                print("⚠️ [Interactive] \(error)")
+                try? await elevenLabsTTSClient.speakText("Something went wrong. Try again.")
+            }
+
+            // Always reset state on exit — even on cancel. Otherwise the
+            // voiceState observer's `.responding` guard blocks future dictation.
+            clearDetectedElementLocation()
+            voiceState = .idle
+            interactiveFinalNarrationBuffer = ""
+            scheduleTransientHideIfNeeded()
+        }
+    }
+
+    /// Dispatches a single Claude tool call. If the call targets a specific
+    /// UI element (its args contain a `@eN` ref), the cursor flies to that
+    /// element first so the user sees what is about to happen. Otherwise the
+    /// cursor returns to mouse-following.
+    private func flyCursorAndDispatchInteractiveToolCall(
+        _ interactiveToolCall: InteractiveToolCall,
+        targetApplicationName: String
+    ) async -> InteractiveToolResult {
+        // Discard any text Claude emitted before this tool call. We only
+        // speak the final trailing text block; intermediate narration is slop.
+        interactiveFinalNarrationBuffer = ""
+
+        let rawArgumentsString = interactiveToolCall.input["args"]?.stringValue ?? ""
+        if let elementReferenceIdentifier = Self.firstElementReferenceIdentifier(in: rawArgumentsString),
+           let elementCursorTarget = await elementScreenCenterFromAgentDesktop(
+               elementReferenceIdentifier: elementReferenceIdentifier
+           ) {
+            voiceState = .idle
+            detectedElementBubbleText = nil
+            detectedElementScreenLocation = elementCursorTarget.globalLocation
+            detectedElementDisplayFrame = elementCursorTarget.displayFrame
+            try? await Task.sleep(nanoseconds: Self.interactiveCursorFlightSleepNanoseconds)
+        } else {
+            clearDetectedElementLocation()
+        }
+
+        voiceState = .processing
+        print("🤖 [Interactive] \(interactiveToolCall.toolName) \(rawArgumentsString)")
+
+        let interactiveToolResult = await InteractiveToolDispatcher.dispatch(
+            interactiveToolCall,
+            targetApplicationName: targetApplicationName,
+            runner: agentDesktopRunner
+        )
+        if interactiveToolResult.isError {
+            print("⚠️ [Interactive] tool failed: \(interactiveToolResult.content)")
+        }
+        return interactiveToolResult
+    }
+
+    /// Speaks Claude's trailing text block (the post-`end_turn` summary) if
+    /// there is one. Truncated to prevent a verbose model from dumping a wall
+    /// of TTS onto the user.
+    private func speakFinalInteractiveNarrationIfAny() async {
+        let trimmedFinalNarration = interactiveFinalNarrationBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        interactiveFinalNarrationBuffer = ""
+        guard !trimmedFinalNarration.isEmpty else { return }
+
+        let cappedNarration = String(trimmedFinalNarration.prefix(Self.interactiveFinalNarrationMaximumCharacters))
+        voiceState = .responding
+        do {
+            try await elevenLabsTTSClient.speakTextAndAwaitCompletion(cappedNarration)
+        } catch {
+            print("⚠️ [Interactive] final TTS error: \(error.localizedDescription)")
+        }
+    }
+
+    private func appendInteractiveResultToConversationHistory(
+        userTranscript: String,
+        interactiveClaudeResult: InteractiveClaudeResult
+    ) {
+        let strippedAssistantText = interactiveClaudeResult.fullConcatenatedText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolNamesExecutedSummary = interactiveClaudeResult.toolCallsExecuted
+            .map { "called \($0.toolName)" }
+            .joined(separator: ", ")
+        let historyAssistantEntry = toolNamesExecutedSummary.isEmpty
+            ? strippedAssistantText
+            : "\(strippedAssistantText) (Clicky executed: \(toolNamesExecutedSummary))"
+
+        conversationHistory.append((
+            userTranscript: userTranscript,
+            assistantResponse: historyAssistantEntry
+        ))
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
+    }
+
+    /// Returns the first `@eN` ref in an args string, or nil if the command
+    /// does not target a specific UI element (e.g. `snapshot`, `launch`, `press`).
+    private static func firstElementReferenceIdentifier(in argumentsString: String) -> String? {
+        guard let matchedRange = argumentsString.range(
+            of: #"@e\d+"#,
+            options: .regularExpression
+        ) else {
+            return nil
+        }
+        return String(argumentsString[matchedRange])
+    }
+
+    /// Queries an element's bounds via `agent-desktop get @eN --property bounds`
+    /// and converts the AX coordinates (top-left origin on primary display) to
+    /// AppKit global coordinates (bottom-left origin on primary display) so the
+    /// overlay can animate the cursor to the element's center.
+    private func elementScreenCenterFromAgentDesktop(
+        elementReferenceIdentifier: String
+    ) async -> (globalLocation: CGPoint, displayFrame: CGRect)? {
+        do {
+            let boundsRunnerResult = try await agentDesktopRunner.runCommand(
+                arguments: ["get", elementReferenceIdentifier, "--property", "bounds"],
+                timeoutSeconds: 3.0
+            )
+            guard let boundsDataJSONUTF8 = boundsRunnerResult.dataJSON.data(using: .utf8),
+                  let parsedBoundsTopLevel = try JSONSerialization.jsonObject(with: boundsDataJSONUTF8) as? [String: Any],
+                  let boundsValueDictionary = parsedBoundsTopLevel["value"] as? [String: Any],
+                  let accessibilityOriginX = (boundsValueDictionary["x"] as? NSNumber)?.doubleValue,
+                  let accessibilityOriginY = (boundsValueDictionary["y"] as? NSNumber)?.doubleValue,
+                  let elementWidthInPoints = (boundsValueDictionary["width"] as? NSNumber)?.doubleValue,
+                  let elementHeightInPoints = (boundsValueDictionary["height"] as? NSNumber)?.doubleValue,
+                  elementWidthInPoints > 0, elementHeightInPoints > 0,
+                  let primaryDisplay = NSScreen.screens.first else {
+                return nil
+            }
+
+            let accessibilityCenterX = accessibilityOriginX + elementWidthInPoints / 2.0
+            let accessibilityCenterY = accessibilityOriginY + elementHeightInPoints / 2.0
+            let appKitGlobalLocation = CGPoint(
+                x: accessibilityCenterX,
+                y: primaryDisplay.frame.height - accessibilityCenterY
+            )
+            let displayContainingElement = NSScreen.screens.first(where: {
+                NSMouseInRect(appKitGlobalLocation, $0.frame, false)
+            }) ?? primaryDisplay
+
+            return (appKitGlobalLocation, displayContainingElement.frame)
+        } catch {
+            print("⚠️ [Interactive] bounds query failed for \(elementReferenceIdentifier): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func installInteractiveEscapeMonitor() {
+        interactiveEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return } // Escape
+            print("🤖 [Interactive] cancelled by Escape")
+            self?.currentResponseTask?.cancel()
+        }
+    }
+
+    private func tearDownInteractiveEscapeMonitor() {
+        if let escapeMonitor = interactiveEscapeMonitor {
+            NSEvent.removeMonitor(escapeMonitor)
+            interactiveEscapeMonitor = nil
         }
     }
 

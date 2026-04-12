@@ -162,39 +162,19 @@ enum BuddyPushToTalkShortcut {
     ) -> ShortcutTransition {
         if let modifierOnlyFlags = currentShortcutOption.modifierOnlyFlags {
             guard shortcutEventType == .flagsChanged else { return .none }
-
             let isShortcutCurrentlyPressed = modifierFlags.contains(modifierOnlyFlags)
-
-            if isShortcutCurrentlyPressed && !wasShortcutPreviouslyPressed {
-                return .pressed
-            }
-
-            if !isShortcutCurrentlyPressed && wasShortcutPreviouslyPressed {
-                return .released
-            }
-
+            if isShortcutCurrentlyPressed && !wasShortcutPreviouslyPressed { return .pressed }
+            if !isShortcutCurrentlyPressed && wasShortcutPreviouslyPressed { return .released }
             return .none
         }
-
         guard let pushToTalkModifierFlags = currentShortcutOption.spaceShortcutModifierFlags else {
             return .none
         }
-
         let matchesModifierFlags = modifierFlags.isSuperset(of: pushToTalkModifierFlags)
-
-        if shortcutEventType == .keyDown
-            && keyCode == pushToTalkKeyCode
-            && matchesModifierFlags
-            && !wasShortcutPreviouslyPressed {
-            return .pressed
-        }
-
-        if shortcutEventType == .keyUp
-            && keyCode == pushToTalkKeyCode
-            && wasShortcutPreviouslyPressed {
-            return .released
-        }
-
+        if shortcutEventType == .keyDown && keyCode == pushToTalkKeyCode
+            && matchesModifierFlags && !wasShortcutPreviouslyPressed { return .pressed }
+        if shortcutEventType == .keyUp && keyCode == pushToTalkKeyCode
+            && wasShortcutPreviouslyPressed { return .released }
         return .none
     }
 }
