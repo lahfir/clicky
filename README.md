@@ -1,228 +1,139 @@
-# Hi, this is Clicky.
-It's an AI buddy that lives as a companion next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
+# Clicky
 
-Download it [here](https://www.clicky.so/) for free.
+An AI buddy that lives next to your cursor. It can see your screen, talk to you, point at stuff, and drive your apps.
 
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
+Download it [here](https://www.clicky.so/) · [Original tweet](https://x.com/FarzaTV/status/2041314633978659092)
 
-![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
+![Clicky](clicky-demo.gif)
 
-**Clicky has two modes.** One push-to-talk chord (`ctrl + option`), one environment variable to flip between modes:
+## Two modes, one chord
 
-- **Show mode** (default) — the original. Clicky watches your screen, explains what you're looking at, and flies its blue cursor around to point at specific UI elements. Great for "what does this button do?" and "how do I turn off this setting?"
-- **Interactive mode** (set `CLICKY_INTERACTIVE_MODE=1` in your Xcode scheme and relaunch) — the new one. Clicky actually *drives* the app for you: clicks, types, navigates, opens things. Hold the chord, say what you want, release. You hear "on it", the amber cursor flies to each element as Clicky works, and at the end Clicky tells you what happened in one sentence. It's powered by [agent-desktop](https://github.com/lahfir/agent-desktop) (a separate CLI you install once) and Anthropic's native `tool_use` API with prompt caching and server-side context editing. Non-destructive by default — edit `InteractiveToolManifest.swift` to change what Clicky is allowed to do.
+Hold `ctrl + option`, say what you want, release. What happens depends on `CLICKY_INTERACTIVE_MODE`:
 
-This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
+- **Show mode** (default) — Clicky explains what's on your screen and flies its blue cursor to point at things.
+- **Interactive mode** (`CLICKY_INTERACTIVE_MODE=1`) — Clicky actually clicks, types, and navigates for you.
 
-## Get started with Claude Code
-
-The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
-
-Once you get Claude running, paste this:
+## Quick start (Claude Code)
 
 ```
-Hi Claude.
-
-Clone https://github.com/farzaa/clicky.git into my current directory.
-
-Then read the CLAUDE.md. I want to get Clicky running locally on my Mac.
-
-Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
+Clone https://github.com/farzaa/clicky.git.
+Read CLAUDE.md and walk me through setup.
 ```
-
-That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
 
 ## Manual setup
 
-If you want to do it yourself, here's the deal.
+**Prereqs:** macOS 14.2+, Xcode 15+, Node 18+, Cloudflare account, API keys for [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io).
 
-### Prerequisites
-
-- macOS 14.2+ (for ScreenCaptureKit)
-- Xcode 15+
-- Node.js 18+ (for the Cloudflare Worker)
-- A [Cloudflare](https://cloudflare.com) account (free tier works)
-- API keys for: [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io)
-
-### 1. Set up the Cloudflare Worker
-
-The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
+### 1. Worker
 
 ```bash
 cd worker
 npm install
-```
-
-Now add your secrets. Wrangler will prompt you to paste each one:
-
-```bash
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ASSEMBLYAI_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
 ```
 
-For the ElevenLabs voice ID, open `wrangler.toml` and set it there (it's not sensitive):
+Set `ELEVENLABS_VOICE_ID` in `wrangler.toml` under `[vars]`.
 
-```toml
-[vars]
-ELEVENLABS_VOICE_ID = "your-voice-id-here"
-```
+Deploy: `npx wrangler deploy` → copy the `*.workers.dev` URL.
 
-Deploy it:
+**Local dev:** create `worker/.dev.vars` with the same keys, then `npx wrangler dev` (serves on `http://localhost:8787`).
 
-```bash
-npx wrangler deploy
-```
-
-It'll give you a URL like `https://your-worker-name.your-subdomain.workers.dev`. Copy that.
-
-### 2. Run the Worker locally (for development)
-
-If you want to test changes to the Worker without deploying:
+### 2. Point the app at your Worker
 
 ```bash
-cd worker
-npx wrangler dev
+grep -rn "clicky-proxy" leanring-buddy/
 ```
 
-This starts a local server (usually `http://localhost:8787`) that behaves exactly like the deployed Worker. You'll need to create a `.dev.vars` file in the `worker/` directory with your keys:
+Replace the URL in the matches (`CompanionManager.swift`, `AssemblyAIStreamingTranscriptionProvider.swift`).
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-ASSEMBLYAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
-```
-
-Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
-
-### 3. Update the proxy URLs in the app
-
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
-
-```bash
-grep -r "clicky-proxy" leanring-buddy/
-```
-
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
-
-### 4. Open in Xcode and run
+### 3. Build
 
 ```bash
 open leanring-buddy.xcodeproj
 ```
 
-In Xcode:
-1. Select the `leanring-buddy` scheme (yes, the typo is intentional, long story)
-2. Set your signing team under Signing & Capabilities
-3. Hit **Cmd + R** to build and run
+- Scheme: `leanring-buddy` (the typo is intentional, don't rename it)
+- Signing & Capabilities: set your team
+- Cmd+R
 
-The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
+Menu bar icon → click → grant Microphone, Accessibility, Screen Recording.
 
-### Permissions the app needs
+## Interactive mode
 
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (both chords) and (if you use Interactive mode) for agent-desktop to drive other apps
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
-
-> Interactive mode needs a **separate** Accessibility grant for the `agent-desktop` CLI itself. See the [Interactive Mode](#interactive-mode) section for the full setup — it's an extra two clicks on first use.
-
-## Interactive Mode
-
-One chord, one env var. You still hold `ctrl + option` to talk to Clicky. If `CLICKY_INTERACTIVE_MODE` is set in your environment, releasing the chord fires the interactive pipeline (agent-desktop + Anthropic tool_use). If it's not set, Clicky is in Show mode and behaves exactly like it always has.
-
-**How it feels.** The moment you release the chord, Clicky says "on it" so you know it heard you. Then it works silently — the amber cursor flies to each UI element it's about to touch, clicks happen, the tree changes, the cursor flies to the next thing. When it's done it speaks one short sentence about what it accomplished. No "taking a snapshot, now clicking the button, now…" play-by-play. Press Escape mid-sequence to cancel.
-
-**What it can do.** The tool manifest in `InteractiveToolManifest.swift` is the authoritative allow-list — Anthropic only lets Claude call tools you declared. v1 exposes a deliberately non-destructive subset: observation (`snapshot`, `screenshot`, `find`), navigation (`click`, `focus`, `scroll`, `hover`, `expand`/`collapse`), text entry (`type`, `press`, `select`, `check`/`uncheck`/`toggle`), and app lifecycle (`launch`, `focus-window`, `list-apps`). Things that ship in agent-desktop but aren't in the manifest on purpose: `close-app`, `drag`, `set-value`, `right-click`, `clear`, raw mouse events, window resize/move, clipboard writes. Want Clicky to send Slack messages or delete files? Add the tool to the manifest yourself — it's one entry in an array.
-
-### Turn it on
-
-Two steps. Install the CLI, then set the env var.
+### 1. Install the CLI
 
 ```bash
 npm install -g agent-desktop@0.1.11
 ```
 
-Then in Xcode: **Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables**, add `CLICKY_INTERACTIVE_MODE` with value `1`, and relaunch. Accepted values are `1`, `true`, `yes`, `enabled`, `on` — anything else (including unset) means Show mode.
+### 2. Set the env var in Xcode
 
-You'll see a line in the Xcode console on launch confirming which mode you're in: `🤖 InteractiveModeConfiguration: ENABLED` or `… DISABLED`.
+**Product → Scheme → Edit Scheme → Run → Arguments → Environment Variables**, add `CLICKY_INTERACTIVE_MODE = 1`, relaunch.
 
-To turn it off, unset the variable and relaunch. There's no UI toggle on purpose — the whole thing is one env var so there's exactly one place to change.
+Console confirms on launch: `🤖 InteractiveModeConfiguration: ENABLED`.
 
-### Grant accessibility to agent-desktop
+### 3. Grant agent-desktop accessibility
 
-macOS treats `agent-desktop` as a completely separate binary from Clicky, so it needs its own Accessibility grant — a second checkbox next to Clicky's in the same System Settings pane. First time Clicky tries to run a tool, macOS will prompt you. Click through, done.
-
-You can also grant it proactively:
+First run prompts you, or do it now:
 
 ```bash
 agent-desktop permissions --request
 ```
 
-To check later, open **System Settings → Privacy & Security → Accessibility**. You should see both `leanring-buddy` and `agent-desktop` as separate entries. Both need to be on.
+**System Settings → Privacy & Security → Accessibility** should show both `leanring-buddy` and `agent-desktop`.
 
-### How to use it
+### 4. Use it
 
-Hold `ctrl + option`, say what you want, release. You'll hear "on it" immediately, then the cursor flies around while Clicky works. At the end Clicky speaks one sentence about what happened. Press Escape mid-sequence to cancel.
+Hold `ctrl + option`, speak, release.
 
-Things that work well: *"open Finder and go to Downloads"*, *"open TextEdit and type hello world"*, *"in Docker Desktop search for gemma"*, *"scroll down"*, *"open System Settings and go to Displays"*.
+- You hear "on it" immediately
+- Amber cursor flies to each UI element
+- One sentence summary at the end
+- Escape cancels
 
-Things to know: browsers (Chrome, Safari, Arc) and Electron apps (Slack, VS Code, Cursor, Discord, Notion, Linear, Figma) have unreliable accessibility trees, so Interactive mode's results in those apps are hit-or-miss — Show mode is usually a better fit. Native macOS apps (Finder, Mail, Messages, TextEdit, System Settings, Xcode, Docker Desktop, App Store, etc.) work well.
+**Works well:** Finder, Mail, Messages, TextEdit, System Settings, Xcode, Docker Desktop, App Store.
 
-### Customizing what it can do
+**Hit-or-miss:** browsers (Chrome, Safari, Arc) and Electron apps (Slack, VS Code, Cursor, Discord, Notion, Linear, Figma) — use Show mode for those.
 
-The tool manifest lives in `leanring-buddy/InteractiveToolManifest.swift` as a single static array called `v1Tools`. It declares one generic `agent_desktop` tool whose description lists every CLI command Claude is allowed to invoke. Add a command to the description, remove one, tighten an input schema — that's the only place to edit. There's no separate Swift-side deny list; Anthropic's API enforces that Claude can only call tools you declared, and the dispatcher passes args through to the CLI verbatim.
+### 5. Customize what it can do
 
-### Performance tuning (Anthropic best practices)
+Edit `leanring-buddy/InteractiveToolManifest.swift`. The `v1Tools` array declares every agent-desktop command Claude is allowed to call. Non-destructive by default (no `close-app`, `drag`, `set-value`, raw mouse, window resize).
 
-Interactive mode uses three documented features that matter for multi-turn tool loops:
+## Troubleshooting
 
-- **Context editing** (`clear_tool_uses_20250919` via the `context-management-2025-06-27` beta header) — Anthropic prunes stale `tool_result` payloads server-side once the conversation exceeds 40K input tokens, keeping the 3 most recent tool uses. Accessibility snapshots are 200–300 KB each, so this is load-bearing.
-- **Prompt caching** — `cache_control: ephemeral` on the last tool definition and the system prompt. The manifest + prompt are stable across every turn, so caching saves ~90% of the repeated input tokens (5-minute TTL). Cached tokens also don't count toward rate limits.
-- **`disable_parallel_tool_use`** — Clicky dispatches tools sequentially anyway (so the cursor has time to fly to each element), so we force Claude to emit one tool_use per turn instead of fighting over parallel calls.
-
-On 429s Clicky honors Anthropic's `Retry-After` header verbatim and retries the same turn once. The Worker proxy forwards both headers (`anthropic-beta` upstream, `Retry-After` downstream) — check `worker/src/index.ts` if you're running your own proxy.
-
-### Troubleshooting
-
-- **Pressing ctrl+option still points at things instead of acting** — `CLICKY_INTERACTIVE_MODE` isn't set, or is set to something Clicky doesn't recognize as enabled. Check the Xcode console for the `InteractiveModeConfiguration:` log line on launch.
-- **"Interactive mode needs agent-desktop"** — install the CLI (`npm install -g agent-desktop@0.1.11`).
-- **"I need accessibility permission for agent-desktop"** — grant it in System Settings or run `agent-desktop permissions --request`. Separate entry from Clicky's own grant.
-- **"The window kept changing — try again"** — Clicky lost track of the UI between observations. Just invoke again.
-- **"I can only act on native desktop apps"** — frontmost app is a browser or Electron. Clicky falls through to Show mode.
+- **Pressing the chord still points at things** — `CLICKY_INTERACTIVE_MODE` not set. Check the console log on launch.
+- **"agent-desktop not found"** — install it: `npm install -g agent-desktop@0.1.11`.
+- **"I need accessibility permission for agent-desktop"** — separate grant from Clicky's. Run `agent-desktop permissions --request`.
+- **Rate limit 429** — automatic retry via Anthropic's `Retry-After` header.
+- **Hit max_tokens** — raise `max_tokens` in `ClaudeAPI.swift` or shorten the task.
 
 ## Architecture
 
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
+Menu bar app, no dock icon. Two `NSPanel` windows: control panel dropdown + full-screen transparent cursor overlay. Push-to-talk → AssemblyAI websocket → transcript → one of two pipelines:
 
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, then hands off to one of two pipelines based on `CLICKY_INTERACTIVE_MODE`:
+- **Show:** transcript + screenshot → Claude SSE → ElevenLabs TTS. `[POINT:x,y:label:screenN]` tags fly the cursor.
+- **Interactive:** transcript → Claude `tool_use` multi-turn loop → `agent-desktop` CLI. Uses Anthropic's context editing (`clear_tool_uses_20250919`), prompt caching (`cache_control: ephemeral`), and `disable_parallel_tool_use`. Bounds fetched on-demand via `agent-desktop get @eN --property bounds`.
 
-- **Show pipeline:** transcript + multi-monitor screenshot → Claude via streaming SSE → ElevenLabs TTS. Claude embeds `[POINT:x,y:label:screenN]` tags in responses to make the blue cursor fly to specific UI elements.
-- **Interactive pipeline:** transcript → Claude via streaming SSE with Anthropic's native `tool_use` API, a generic `agent_desktop` tool, `clear_tool_uses_20250919` server-side context editing, and `cache_control: ephemeral` on the system prompt and tool manifest. Each `tool_use` block extracts a `@eN` ref from the args, queries its screen bounds via `agent-desktop get @eN --property bounds`, flies the amber cursor to the element, then dispatches the CLI command. One summary sentence spoken at the end.
+All three APIs proxied through a Cloudflare Worker holding the keys.
 
-All three APIs (Claude, AssemblyAI tokens, ElevenLabs TTS) are proxied through a Cloudflare Worker that holds the real keys as secrets.
+Full breakdown: [`CLAUDE.md`](CLAUDE.md).
 
-## Project structure
+## Project layout
 
 ```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
+leanring-buddy/          # Swift source (typo is permanent)
+  CompanionManager.swift         # Central state machine
+  ClaudeAPI.swift                # Claude streaming + tool_use loop
+  InteractiveToolManifest.swift  # Tool allow-list
+  AgentDesktopRunner.swift       # agent-desktop CLI wrapper
+  InteractiveOutboundSafety.swift # Secret redaction
+  OverlayWindow.swift            # Cursor overlay
+worker/src/index.ts      # Cloudflare Worker (/chat, /tts, /transcribe-token)
+CLAUDE.md                # Full architecture doc
 ```
 
 ## Contributing
 
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
-
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+PRs welcome. DM [@farzatv](https://x.com/farzatv) with feedback.
