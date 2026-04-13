@@ -581,6 +581,11 @@ final class CompanionManager: ObservableObject {
     /// parallel with the first Claude request.
     private static let interactiveAcknowledgmentPhrase = "on it"
 
+    /// The last tool invocation (command + args) that was dispatched in the
+    /// current interactive pipeline. Used to detect pathological loops where
+    /// Claude keeps issuing the same action without re-observing the UI.
+    private var lastDispatchedInteractiveInvocation: (commandName: String, argsString: String)?
+
     private static func buildInteractiveSystemPrompt(targetApplicationName: String) -> String {
         """
         you are clicky. you silently drive macOS apps via the agent_desktop tool. the user is \
@@ -593,7 +598,13 @@ final class CompanionManager: ObservableObject {
         2. DRILL — expand a region with command="snapshot", args="--root @eN -i --compact". scoped invalidation: \
         only @eN's subtree refs change, other refs stay valid. never re-snapshot the whole app if you can drill.
         3. ACT — click, type, select, toggle, scroll the element you found.
-        4. VERIFY — re-drill the SAME region (--root @eN) to confirm the state change.
+        4. VERIFY — re-drill the SAME region (--root @eN) to confirm the state change. ALWAYS do this after every action.
+
+        CRITICAL — NEVER REPEAT THE SAME ACTION TWICE IN A ROW. if you clicked @e40 and the UI didn't change, \
+        do NOT click @e40 again. the click already went through. re-snapshot the region to see what really \
+        happened, or try a different element, or use `find` to locate what you actually need. clicky's \
+        dispatcher will refuse duplicate actions and you'll waste tool calls against the loop limit. if \
+        you find yourself thinking "let me try clicking that one more time", stop and snapshot instead.
 
         shortcuts:
         - if you already know the exact role+name, use command="find" with args like '--app "\(targetApplicationName)" --role button --name "Save" --first' — faster than any snapshot.
@@ -659,6 +670,7 @@ final class CompanionManager: ObservableObject {
                 guard !Task.isCancelled else { return }
 
                 interactiveFinalNarrationBuffer = ""
+                lastDispatchedInteractiveInvocation = nil
                 let priorConversationHistory = conversationHistory.map {
                     (userTranscript: $0.userTranscript, assistantResponse: $0.assistantResponse)
                 }
@@ -719,6 +731,7 @@ final class CompanionManager: ObservableObject {
             clearDetectedElementLocation()
             voiceState = .idle
             interactiveFinalNarrationBuffer = ""
+            lastDispatchedInteractiveInvocation = nil
             scheduleTransientHideIfNeeded()
         }
     }
@@ -757,6 +770,25 @@ final class CompanionManager: ObservableObject {
 
         let shouldFlyCursorForThisCommand = Self.interactiveCursorFlightCommandAllowlist.contains(cliCommandName)
 
+        // Loop guard: if Claude is about to dispatch the EXACT same action
+        // command twice in a row (same command name + same args) without
+        // an intervening observation, short-circuit with a synthetic error.
+        // This breaks the pathological "click, no visible change, click
+        // again, repeat until loop limit" failure mode without actually
+        // running the subprocess a second time. Only applies to action
+        // commands — snapshot/get/find can legitimately repeat.
+        if shouldFlyCursorForThisCommand,
+           let previousInvocation = lastDispatchedInteractiveInvocation,
+           previousInvocation.commandName == cliCommandName,
+           previousInvocation.argsString == rawArgumentsString {
+            print("🛑 [Interactive] refusing repeat \(cliCommandName) \(rawArgumentsString) — forcing re-observation")
+            return InteractiveToolResult(
+                toolUseID: interactiveToolCall.toolUseID,
+                content: "Refused: you already ran `\(cliCommandName) \(rawArgumentsString)` once. The click went through; re-snapshot the affected region (command=\"snapshot\" args=\"--root @eN -i --compact\") to see what changed before issuing any other action. If nothing changed, try a different element, a different command, or use `find` / `wait` to locate the next step.",
+                isError: true
+            )
+        }
+
         if shouldFlyCursorForThisCommand,
            let elementReferenceIdentifier = Self.firstElementReferenceIdentifier(in: rawArgumentsString),
            let elementCursorTarget = await elementScreenCenterFromAgentDesktop(
@@ -783,6 +815,18 @@ final class CompanionManager: ObservableObject {
         if interactiveToolResult.isError {
             print("⚠️ [Interactive] \(cliCommandNameForLogging) failed: \(interactiveToolResult.content)")
         }
+
+        // Record the successful dispatch for the repeat-action loop guard.
+        // We only track action commands (the ones in the cursor-flight
+        // allowlist) because observation commands legitimately repeat.
+        if shouldFlyCursorForThisCommand {
+            lastDispatchedInteractiveInvocation = (cliCommandName, rawArgumentsString)
+        } else {
+            // An observation or system command resets the tracker so the
+            // next identical action is allowed again.
+            lastDispatchedInteractiveInvocation = nil
+        }
+
         return interactiveToolResult
     }
 
