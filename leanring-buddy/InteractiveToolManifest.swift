@@ -210,27 +210,34 @@ enum InteractiveToolDispatcher {
         // Build the full CLI argument list: [command, ...args]
         let fullCLIArguments = [commandName] + parsedArguments
 
-        // Timeout tuned per-command family. Accessibility-tree snapshots on
-        // heavy apps (Numbers, Xcode, Mail) can genuinely take 5–10 seconds,
-        // so the old 5s cap was cutting them off. Screenshots scale with
-        // window size. Interactive verbs (click, type, focus) are snappy.
+        // Timeout tuned per-command family. Apps with custom-drawn UI
+        // (iWork: Numbers/Pages/Keynote, Electron apps, browsers) can take
+        // 20–30s to enumerate their accessibility tree — and some return
+        // ref_count:0 even after that. Keep timeouts generous so we get a
+        // real answer (or a real empty tree) instead of a timeout error.
         let perCommandTimeoutSeconds: Double
         switch commandName {
         case "snapshot":
-            perCommandTimeoutSeconds = 20.0
+            perCommandTimeoutSeconds = 30.0
         case "screenshot":
-            perCommandTimeoutSeconds = 15.0
+            perCommandTimeoutSeconds = 20.0
         case "find":
-            perCommandTimeoutSeconds = 15.0
+            perCommandTimeoutSeconds = 20.0
+        case "wait":
+            // wait takes an explicit ms argument; give it extra headroom.
+            perCommandTimeoutSeconds = 30.0
         default:
             perCommandTimeoutSeconds = 10.0
         }
 
+        let subprocessStartTime = Date()
         do {
             let commandResult = try await runner.runCommand(
                 arguments: fullCLIArguments,
                 timeoutSeconds: perCommandTimeoutSeconds
             )
+            let subprocessDurationMilliseconds = Int(Date().timeIntervalSince(subprocessStartTime) * 1000)
+            print("⏱️  [Interactive] \(commandName) took \(subprocessDurationMilliseconds)ms")
             return InteractiveToolResult(
                 toolUseID: toolUseID,
                 content: commandResult.dataJSON,

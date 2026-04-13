@@ -605,6 +605,12 @@ final class CompanionManager: ObservableObject {
         - APP_NOT_FOUND → call command="launch" with args='"App Name"', then wait for the window.
         - PERM_DENIED → clicky auto-triggers the permission dialog. stop and let the user handle it.
         - TIMEOUT → widen the timeout or pick a different anchor.
+        - `ref_count: 0` in a snapshot response → the app has limited accessibility support. This is \
+        COMMON for iWork apps (Numbers, Pages, Keynote), browsers (Chrome, Safari, Arc), and Electron \
+        apps (Slack, VS Code, Notion, Linear, Figma) — they draw their own UI and don't expose the \
+        accessibility tree. DO NOT keep retrying snapshot on these apps. Instead: stop, tell the user \
+        honestly that you can't drive this app via accessibility, and suggest they use Show mode \
+        (unset CLICKY_INTERACTIVE_MODE) so Clicky can read their screen visually instead.
 
         SILENCE RULE: emit NO text between tool calls. clicky's cursor visually flies to every element you \
         touch so the user already sees what you're doing. never say "taking snapshot", "clicking", or \
