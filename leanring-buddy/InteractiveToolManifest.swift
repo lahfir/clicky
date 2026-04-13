@@ -100,31 +100,59 @@ enum InteractiveToolManifest {
         InteractiveTool(
             name: "agent_desktop",
             description: """
-            Execute an agent-desktop CLI command to drive macOS apps via the accessibility tree.
+            Execute an agent-desktop CLI command to drive macOS apps via the native accessibility tree.
 
-            AVAILABLE COMMANDS:
-            - snapshot --app "App Name" -i --compact — capture the accessibility tree. ALWAYS call this first. Returns element refs like @e7 that you use in every other command.
-            - click @eN — click an element by ref.
-            - type @eN "text to type" — focus an element and type text. NEVER type passwords, API keys, or secrets.
-            - press KEY — keyboard combo ("tab", "escape", "return", "cmd+a", ...).
-            - focus @eN — set keyboard focus on an element.
-            - scroll @eN --direction up|down|left|right --amount N — scroll an element.
-            - scroll-to @eN — scroll an element into view.
-            - hover @eN — move cursor over an element.
-            - expand @eN / collapse @eN — disclosure triangle.
-            - toggle @eN / check @eN / uncheck @eN — checkbox or switch.
+            OBSERVATION:
+            - snapshot --skeleton --app "App" -i --compact — PREFERRED for dense apps (Slack, VS Code, Mail, Numbers, Xcode). Returns a shallow overview with children_count per region and refs on named containers at the truncation boundary. Use this to locate the region containing your target, then drill.
+            - snapshot --root @eN -i --compact — drill into a region identified from the skeleton. Scoped invalidation: only @eN's subtree refs change; other refs stay valid.
+            - snapshot --app "App" -i --compact — full tree. Only for simple apps with few elements (Finder, Calculator, TextEdit).
+            - snapshot --app "App" --surface menu -i — snapshot of a menu / sheet / alert overlay. Never combine --surface with --skeleton.
+            - find --app "App" --role button --name "Save" — targeted search by role/name/text/value. Faster than snapshot when you know what you're looking for. Supports --first, --last, --nth N.
+            - get @eN --property text|value|title|bounds|role|states — read a specific element property.
+            - is @eN --property visible|enabled|checked|focused|expanded — check element state.
+            - screenshot --app "App" — PNG of a window.
+            - list-surfaces --app "App" — list available surfaces (window, menu, sheet, ...).
+
+            INTERACTION:
+            - click @eN / double-click @eN / triple-click @eN / right-click @eN
+            - type @eN "text to type" — focus and type. NEVER type passwords, API keys, or secrets.
+            - focus @eN — set keyboard focus.
             - select @eN --option "Option Name" — dropdown option.
-            - screenshot --app "App Name" — PNG screenshot of a window.
-            - launch "App Name" — launch an application.
-            - list-apps — list running GUI applications.
-            - list-windows --app "App Name" — list visible windows.
-            - focus-window --app "App Name" — bring an app's window to front.
-            - find --app "App Name" --text "search query" — search for elements by text.
+            - toggle @eN / check @eN / uncheck @eN — checkbox or switch (check/uncheck are idempotent).
+            - expand @eN / collapse @eN — disclosure triangle.
+            - scroll @eN --direction up|down|left|right --amount N
+            - scroll-to @eN — scroll element into view.
+            - hover @eN — move cursor over element.
+
+            KEYBOARD & SYSTEM:
+            - press KEY — "tab", "escape", "return", "cmd+a", "shift+tab", "down", etc.
+            - launch "App Name" — launch and wait for window.
+            - list-apps — running GUI applications.
+            - list-windows --app "App" — visible windows.
+            - focus-window --app "App" — bring window to front.
+
+            ASYNC UI:
+            - wait MS — pause N milliseconds.
+            - wait --element @eN --timeout 5000 — wait for element to appear.
+            - wait --window "Title" --timeout 5000 — wait for a window.
+            - wait --text "Done" --app "App" — wait for text to appear.
+            - wait --menu --app "App" — wait for a context menu to open.
+            - wait --menu-closed --app "App" — wait for a menu to dismiss.
+
+            ERROR CODES (from error.code in the tool_result):
+            - STALE_REF / ELEMENT_NOT_FOUND — the ref is from a stale snapshot. Re-snapshot (or re-drill with --root) and try again with the new ref.
+            - PERM_DENIED — Clicky will auto-trigger the macOS permission dialog. Stop and wait for the user.
+            - APP_NOT_FOUND — the app isn't running. Call `launch "App Name"` first.
+            - ACTION_NOT_SUPPORTED — the element can't do that. Try a different command (e.g. set-value instead of type).
+            - TIMEOUT — a wait condition didn't resolve. Widen the timeout or pick a different anchor.
 
             RULES:
-            - Emit NO text between tool calls. Clicky's cursor visually flies to every element you touch, so the user already sees what you're doing.
-            - Re-snapshot after any action that mutates the UI (opening menus, switching tabs, expanding rows).
-            - After the LAST action, emit ONE short sentence (≤8 words) about what you accomplished — e.g. "opened build settings".
+            - Start dense apps with `snapshot --skeleton -i --compact`. Drill with `--root @eN`, don't re-snapshot the whole app.
+            - Prefer `find` when you know the exact role + name.
+            - After UI-mutating actions (click, type, expand), re-drill ONLY the affected region via `--root @eN`. Refs outside that region stay valid.
+            - After launching an app or opening a dialog, use `wait` — don't assume the UI is ready.
+            - Emit NO text between tool calls. Clicky's cursor visually flies to every element you touch.
+            - After the LAST action, emit ONE short sentence (≤15 words) about what you accomplished.
             - Never type secrets, passwords, or API keys.
             """,
             input_schema: InteractiveToolInputSchema(
