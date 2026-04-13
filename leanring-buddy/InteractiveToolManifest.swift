@@ -182,22 +182,72 @@ enum InteractiveToolDispatcher {
         // Build the full CLI argument list: [command, ...args]
         let fullCLIArguments = [commandName] + parsedArguments
 
+        // Timeout tuned per-command family. Accessibility-tree snapshots on
+        // heavy apps (Numbers, Xcode, Mail) can genuinely take 5–10 seconds,
+        // so the old 5s cap was cutting them off. Screenshots scale with
+        // window size. Interactive verbs (click, type, focus) are snappy.
+        let perCommandTimeoutSeconds: Double
+        switch commandName {
+        case "snapshot":
+            perCommandTimeoutSeconds = 20.0
+        case "screenshot":
+            perCommandTimeoutSeconds = 15.0
+        case "find":
+            perCommandTimeoutSeconds = 15.0
+        default:
+            perCommandTimeoutSeconds = 10.0
+        }
+
         do {
             let commandResult = try await runner.runCommand(
                 arguments: fullCLIArguments,
-                timeoutSeconds: commandName == "snapshot" ? 5.0 : 10.0
+                timeoutSeconds: perCommandTimeoutSeconds
             )
             return InteractiveToolResult(
                 toolUseID: toolUseID,
                 content: commandResult.dataJSON,
                 isError: false
             )
-        } catch {
+        } catch let runnerError as AgentDesktopRunnerError {
+            // Auto-prompt for the macOS Accessibility dialog if the error
+            // is actually a denied permission. Without this the user just
+            // sees a silent failure — macOS will now surface the system
+            // permission sheet on their next action.
+            if case .accessibilityPermissionDenied = runnerError {
+                await requestAgentDesktopAccessibilityPermission(runner: runner)
+            }
             return InteractiveToolResult(
                 toolUseID: toolUseID,
-                content: "\(commandName) failed: \(error.localizedDescription)",
+                content: "\(commandName) failed: \(runnerError.description)",
                 isError: true
             )
+        } catch {
+            // String(describing:) invokes CustomStringConvertible on enums
+            // that conform to it (AgentDesktopError), so Claude sees the
+            // CLI's actual error reason instead of Swift's default
+            // "The operation couldn't be completed. (X error N.)" noise.
+            return InteractiveToolResult(
+                toolUseID: toolUseID,
+                content: "\(commandName) failed: \(String(describing: error))",
+                isError: true
+            )
+        }
+    }
+
+    /// Runs `agent-desktop permissions --request` which triggers the macOS
+    /// Accessibility permission sheet for the agent-desktop binary. Fire-and-
+    /// forget — the dialog is modal to the user and we don't block on it.
+    private static func requestAgentDesktopAccessibilityPermission(
+        runner: AgentDesktopRunner
+    ) async {
+        do {
+            _ = try await runner.runCommand(
+                arguments: ["permissions", "--request"],
+                timeoutSeconds: 3.0
+            )
+            print("🔑 [Interactive] triggered agent-desktop permission prompt")
+        } catch {
+            print("⚠️ [Interactive] failed to request permission: \(String(describing: error))")
         }
     }
 

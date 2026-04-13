@@ -563,14 +563,17 @@ final class CompanionManager: ObservableObject {
     /// Global monitor that cancels the running pipeline on Escape keydown.
     private var interactiveEscapeMonitor: Any?
 
-    /// Cursor flight animation is 0.6–1.4s depending on distance. 700ms lets
-    /// most flights finish before the action fires and keeps interactions snappy.
-    private static let interactiveCursorFlightSleepNanoseconds: UInt64 = 700_000_000
+    /// Minimum sleep that lets the cursor flight animation actually reach
+    /// the target before the click fires. The flight itself is 0.6–1.4s
+    /// but a 400ms head start covers the visually-important first half
+    /// of the arc — the action happens while the cursor is still landing.
+    private static let interactiveCursorFlightSleepNanoseconds: UInt64 = 400_000_000
 
-    /// Hard cap on final narration length. Gives room for a natural
-    /// conversational answer (~30 words / 1–2 sentences) without letting a
-    /// verbose model dump a paragraph into TTS.
-    private static let interactiveFinalNarrationMaximumCharacters = 220
+    /// Hard cap on final narration length. One short sentence, ~15 words.
+    /// Kept tight on purpose — the pipeline uses fire-and-forget TTS at the
+    /// end so a long narration no longer blocks the pipeline, but shorter
+    /// sentences still feel snappier than long ones.
+    private static let interactiveFinalNarrationMaximumCharacters = 140
 
     /// Short phrase spoken the moment push-to-talk releases, before the
     /// Claude API call even starts. Gives the user immediate audio feedback
@@ -728,7 +731,8 @@ final class CompanionManager: ObservableObject {
         }
 
         voiceState = .processing
-        print("🤖 [Interactive] \(interactiveToolCall.toolName) \(rawArgumentsString)")
+        let cliCommandNameForLogging = interactiveToolCall.input["command"]?.stringValue ?? "?"
+        print("🤖 [Interactive] agent-desktop \(cliCommandNameForLogging) \(rawArgumentsString)")
 
         let interactiveToolResult = await InteractiveToolDispatcher.dispatch(
             interactiveToolCall,
@@ -736,14 +740,16 @@ final class CompanionManager: ObservableObject {
             runner: agentDesktopRunner
         )
         if interactiveToolResult.isError {
-            print("⚠️ [Interactive] tool failed: \(interactiveToolResult.content)")
+            print("⚠️ [Interactive] \(cliCommandNameForLogging) failed: \(interactiveToolResult.content)")
         }
         return interactiveToolResult
     }
 
     /// Speaks Claude's trailing text block (the post-`end_turn` summary) if
-    /// there is one. Truncated to prevent a verbose model from dumping a wall
-    /// of TTS onto the user.
+    /// there is one. Fire-and-forget: playback starts, function returns, the
+    /// pipeline exits immediately while audio keeps playing in the background.
+    /// This is the single biggest speed win for interactive mode — without it
+    /// we'd block the pipeline for the full 5–15s of TTS playback.
     private func speakFinalInteractiveNarrationIfAny() async {
         let trimmedFinalNarration = interactiveFinalNarrationBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         interactiveFinalNarrationBuffer = ""
@@ -752,7 +758,7 @@ final class CompanionManager: ObservableObject {
         let cappedNarration = String(trimmedFinalNarration.prefix(Self.interactiveFinalNarrationMaximumCharacters))
         voiceState = .responding
         do {
-            try await elevenLabsTTSClient.speakTextAndAwaitCompletion(cappedNarration)
+            try await elevenLabsTTSClient.speakText(cappedNarration)
         } catch {
             print("⚠️ [Interactive] final TTS error: \(error.localizedDescription)")
         }
