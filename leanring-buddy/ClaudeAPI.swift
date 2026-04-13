@@ -666,6 +666,17 @@ class ClaudeAPI {
                        let stopReasonValue = messageDeltaPayload["stop_reason"] as? String {
                         stopReasonEmittedInThisTurn = stopReasonValue
                     }
+                    // Log usage to verify prompt caching and spot rate-limit
+                    // trajectory before hitting the TPM ceiling. Cached tokens
+                    // don't count against the input-token-per-minute limit,
+                    // so high cache hit rates are the main mitigation here.
+                    if let usageDictionary = sseEventPayload["usage"] as? [String: Any] {
+                        let inputTokensCount = (usageDictionary["input_tokens"] as? Int) ?? 0
+                        let cacheCreationTokens = (usageDictionary["cache_creation_input_tokens"] as? Int) ?? 0
+                        let cacheReadTokens = (usageDictionary["cache_read_input_tokens"] as? Int) ?? 0
+                        let outputTokensCount = (usageDictionary["output_tokens"] as? Int) ?? 0
+                        print("📊 Claude usage: input=\(inputTokensCount) cache_read=\(cacheReadTokens) cache_write=\(cacheCreationTokens) output=\(outputTokensCount)")
+                    }
 
                 case "message_stop":
                     // Message is complete. Nothing to do — we'll break out
@@ -789,13 +800,28 @@ class ClaudeAPI {
             ]
         ]
 
+        // Rolling cache breakpoint on the second-to-last message so the
+        // entire conversation history up to (but not including) the new
+        // user turn is cacheable. Without this breakpoint, every tool_result
+        // append invalidates the whole prefix and we rack up cache-write
+        // costs every turn. Anthropic's agentic-loop recipe: system cache
+        // + tools cache + message-history cache.
+        let messagesWithRollingCacheBreakpoint = messagesWithRollingHistoryCacheBreakpoint(
+            runningMessagesForNextTurn
+        )
+
+        // Aggressive context editing. Tier-1 Sonnet is 30K input-tokens-per-
+        // minute, so we MUST start pruning well before that. Trigger fires
+        // at 12K input tokens (roughly turn 4–5 of a snapshot-heavy loop)
+        // and frees at least 4K tokens per clear. This keeps each request
+        // bounded before it can hit the TPM limit.
         let contextEditingConfiguration: [String: Any] = [
             "edits": [
                 [
                     "type": "clear_tool_uses_20250919",
-                    "trigger": ["type": "input_tokens", "value": 40000],
-                    "keep": ["type": "tool_uses", "value": 3],
-                    "clear_at_least": ["type": "input_tokens", "value": 8000]
+                    "trigger": ["type": "input_tokens", "value": 12000],
+                    "keep": ["type": "tool_uses", "value": 2],
+                    "clear_at_least": ["type": "input_tokens", "value": 4000]
                 ]
             ]
         ]
@@ -812,9 +838,35 @@ class ClaudeAPI {
             "tools": toolsJSONArrayWithCacheControl,
             "tool_choice": sequentialOnlyToolChoice,
             "system": systemPromptContentBlocksWithCacheControl,
-            "messages": runningMessagesForNextTurn,
+            "messages": messagesWithRollingCacheBreakpoint,
             "context_management": contextEditingConfiguration
         ]
+    }
+
+    /// Places `cache_control: ephemeral` on the LAST content block of the
+    /// second-to-last message in the conversation. This creates a rolling
+    /// cache breakpoint that captures the entire prior history in the cache
+    /// while leaving the newest user turn (tool_results) uncached. Next turn
+    /// the new user turn becomes the second-to-last and joins the cache.
+    /// Requires ≥2 messages; for shorter histories we leave caching to the
+    /// static system/tools breakpoints.
+    private func messagesWithRollingHistoryCacheBreakpoint(
+        _ runningMessages: [[String: Any]]
+    ) -> [[String: Any]] {
+        guard runningMessages.count >= 2 else { return runningMessages }
+        var messagesWithBreakpoint = runningMessages
+        let secondToLastMessageIndex = messagesWithBreakpoint.count - 2
+
+        // The message `content` can be a plain String (for simple history
+        // entries) or an array of content blocks (for tool_use/tool_result
+        // turns). We only attach cache_control to the array form — strings
+        // get left alone, falling back to the static tool/system breakpoints.
+        if var contentBlocks = messagesWithBreakpoint[secondToLastMessageIndex]["content"] as? [[String: Any]],
+           !contentBlocks.isEmpty {
+            contentBlocks[contentBlocks.count - 1]["cache_control"] = ["type": "ephemeral"]
+            messagesWithBreakpoint[secondToLastMessageIndex]["content"] = contentBlocks
+        }
+        return messagesWithBreakpoint
     }
 
     /// Parses the `Retry-After` header from a 429 response. Anthropic returns

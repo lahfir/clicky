@@ -717,10 +717,27 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Dispatches a single Claude tool call. If the call targets a specific
-    /// UI element (its args contain a `@eN` ref), the cursor flies to that
-    /// element first so the user sees what is about to happen. Otherwise the
-    /// cursor returns to mouse-following.
+    /// CLI subcommands that physically act on a specific element — these are
+    /// the only commands where we fly the cursor to the ref, because the user
+    /// is about to see the element change. Observation commands (snapshot,
+    /// get, is, find, screenshot) and system commands (launch, list-apps,
+    /// wait, press) all leave the cursor alone.
+    private static let interactiveCursorFlightCommandAllowlist: Set<String> = [
+        "click", "double-click", "triple-click", "right-click",
+        "type", "set-value", "clear",
+        "focus",
+        "select",
+        "toggle", "check", "uncheck",
+        "expand", "collapse",
+        "scroll", "scroll-to",
+        "hover",
+        "drag"
+    ]
+
+    /// Dispatches a single Claude tool call. If the call is a physical action
+    /// on a specific UI element, the cursor flies to that element first so
+    /// the user sees what is about to happen. Observation and system commands
+    /// leave the cursor alone.
     private func flyCursorAndDispatchInteractiveToolCall(
         _ interactiveToolCall: InteractiveToolCall,
         targetApplicationName: String
@@ -729,8 +746,13 @@ final class CompanionManager: ObservableObject {
         // speak the final trailing text block; intermediate narration is slop.
         interactiveFinalNarrationBuffer = ""
 
+        let cliCommandName = interactiveToolCall.input["command"]?.stringValue ?? ""
         let rawArgumentsString = interactiveToolCall.input["args"]?.stringValue ?? ""
-        if let elementReferenceIdentifier = Self.firstElementReferenceIdentifier(in: rawArgumentsString),
+
+        let shouldFlyCursorForThisCommand = Self.interactiveCursorFlightCommandAllowlist.contains(cliCommandName)
+
+        if shouldFlyCursorForThisCommand,
+           let elementReferenceIdentifier = Self.firstElementReferenceIdentifier(in: rawArgumentsString),
            let elementCursorTarget = await elementScreenCenterFromAgentDesktop(
                elementReferenceIdentifier: elementReferenceIdentifier
            ) {
@@ -744,7 +766,7 @@ final class CompanionManager: ObservableObject {
         }
 
         voiceState = .processing
-        let cliCommandNameForLogging = interactiveToolCall.input["command"]?.stringValue ?? "?"
+        let cliCommandNameForLogging = cliCommandName.isEmpty ? "?" : cliCommandName
         print("🤖 [Interactive] agent-desktop \(cliCommandNameForLogging) \(rawArgumentsString)")
 
         let interactiveToolResult = await InteractiveToolDispatcher.dispatch(
@@ -794,8 +816,12 @@ final class CompanionManager: ObservableObject {
             userTranscript: userTranscript,
             assistantResponse: historyAssistantEntry
         ))
-        if conversationHistory.count > 10 {
-            conversationHistory.removeFirst(conversationHistory.count - 10)
+        // Cap at 4 prior exchanges so the NEXT invocation's initial payload
+        // stays small. Sonnet's tier-1 input-tokens-per-minute limit is
+        // brutal for agentic loops and every extra history entry shaves off
+        // tool-use turns before we hit the 30K TPM ceiling.
+        if conversationHistory.count > 4 {
+            conversationHistory.removeFirst(conversationHistory.count - 4)
         }
     }
 
